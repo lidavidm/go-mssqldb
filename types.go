@@ -102,6 +102,8 @@ type typeInfo struct {
 	XmlInfo   xmlInfo
 	Reader    func(ti *typeInfo, r *tdsBuffer, cryptoMeta *cryptoMetadata, encoding msdsn.EncodeParameters) (res interface{})
 	Writer    func(w io.Writer, ti typeInfo, buf []byte, encoding msdsn.EncodeParameters) (err error)
+	FixedSize int
+	VarSize bool
 }
 
 // Common Language Runtime (CLR) Instances
@@ -143,7 +145,11 @@ func readTypeInfo(r *tdsBuffer, typeId byte, c *cryptoMetadata, encoding msdsn.E
 		}
 		res.Reader = readFixedType
 		res.Buffer = make([]byte, res.Size)
+		res.FixedSize = res.Size
+		res.VarSize = false
 	default: // all others are VARLENTYPE
+		res.FixedSize = 0
+		res.VarSize = true
 		readVarLen(&res, r, c, encoding)
 	}
 	return
@@ -785,6 +791,7 @@ func readVarLen(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata, encoding msdsn.En
 		ti.Size = 3
 		ti.Reader = readByteLenTypeWithEncoding
 		ti.Buffer = make([]byte, ti.Size)
+		ti.FixedSize = 1
 	case typeTimeN, typeDateTime2N, typeDateTimeOffsetN:
 		ti.Scale = r.byte()
 		switch ti.Scale {
@@ -818,6 +825,7 @@ func readVarLen(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata, encoding msdsn.En
 			ti.Scale = r.byte()
 		}
 		ti.Reader = readByteLenTypeWithEncoding
+		ti.FixedSize = 1
 	case typeXml:
 		ti.XmlInfo.SchemaPresent = r.byte()
 		if ti.XmlInfo.SchemaPresent != 0 {
@@ -852,6 +860,7 @@ func readVarLen(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata, encoding msdsn.En
 			ti.Buffer = make([]byte, ti.Size)
 			ti.Reader = readShortLenType
 		}
+		ti.FixedSize = 2
 	case typeText, typeImage, typeNText, typeVariant:
 		// LONGLEN_TYPE
 		ti.Size = int(r.int32())

@@ -1,6 +1,7 @@
 package mssql
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -1256,6 +1257,243 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 		list[i] = namedValueFromDriverNamedValue(nv)
 	}
 	return s.queryContext(ctx, list)
+}
+
+type RawField struct {
+	Name string
+	Nullable bool
+	Size int
+	TypeId uint8
+	Scale uint8
+	Prec uint8
+}
+
+type RawResult struct {
+	Fields []RawField
+	Payload []byte
+	Err error
+}
+
+type RawReader interface {
+	QueryRaw(ctx context.Context, args []driver.NamedValue) chan RawResult
+}
+
+func (s *Stmt) QueryRaw(ctx context.Context, args []driver.NamedValue) chan RawResult {
+	defer s.c.clearOuts()
+
+	out := make(chan RawResult, 64)
+
+	if !s.c.connectionGood {
+		out <- RawResult{Err: driver.ErrBadConn}
+		close(out)
+		return out
+	}
+	list := make([]namedValue, len(args))
+	for i, nv := range args {
+		list[i] = namedValueFromDriverNamedValue(nv)
+	}
+
+	if !s.c.connectionGood {
+		out <- RawResult{Err: driver.ErrBadConn}
+		close(out)
+		return out
+	}
+	var err error
+	if s.doEncryption() && len(list) > 0 {
+		list, err = s.encryptArgs(ctx, list)
+	}
+	if err != nil {
+		out <- RawResult{Err: err}
+		close(out)
+		return out
+	}
+	if err = s.sendQuery(ctx, list); err != nil {
+		out <- RawResult{Err: s.c.checkBadConn(ctx, err, true)}
+		close(out)
+		return out
+	}
+
+	go func() {
+		defer close(out)
+
+		s.c.clearOuts()
+
+		sess := s.c.sess
+
+		packetType, err := sess.buf.BeginRead()
+		if err != nil {
+			sess.LogF(ctx, msdsn.LogErrors, "BeginRead failed %v", err)
+			switch e := err.(type) {
+			case *net.OpError:
+				err = e
+			default:
+				// the named pipe provider returns a raw win32 error so fake an OpError
+				err = &net.OpError{Op: "Read", Err: err}
+			}
+			out <- RawResult{Err: err}
+			return
+		} else if packetType != packReply {
+			badStreamPanic(fmt.Errorf("unexpected packet type in reply: got %v, expected %v", packetType, packReply))
+		}
+
+		var cols []columnStruct
+		// We only expect columnStruct or doneStruct or ReturnStatus
+		// or row tokens
+		for {
+			tok := token(sess.buf.byte())
+			switch tok {
+			case tokenColMetadata:
+				if cols != nil {
+					out <- RawResult{Err: fmt.Errorf("multiple result sets are not implemented")}
+					return
+				}
+				cols = parseColMetadata72(sess.buf, sess)
+				fields := make([]RawField, len(cols))
+				for i, col := range cols {
+					fields[i].Name = col.ColName
+					fields[i].Nullable = col.Flags&colFlagNullable != 0
+					fields[i].Size = col.ti.Size
+					fields[i].TypeId = col.ti.TypeId
+					fields[i].Scale = col.ti.Scale
+					fields[i].Prec = col.ti.Prec
+				}
+				out <- RawResult{Fields: fields}
+			case tokenDone:
+				done := parseDone(sess.buf)
+				if done.isError() {
+					out <- RawResult{Err: done.getError()}
+				} else {
+					return
+				}
+			case tokenRow:
+				if cols == nil {
+					out <- RawResult{Err: fmt.Errorf("received row token before column metadata")}
+					return
+				}
+
+				// MSSQL deals in messages. A message is
+				// divided into packets; two messages may not
+				// share a packet. A message may consist of a
+				// stream of tokens (as a row data message
+				// does), so tokens may span packets.
+
+				// We can accumulate packet data until we have
+				// a full row, then send the row down the
+				// channel. We can't just read whole packets
+				// due to the above.
+
+				// Avoid lots of tiny copies: evaluate the contents of the buffer, and shunt it into either the output buf before fetching more data. At the end decide if there's any leftover data in the stream that we need to put back
+
+				var dataBuf bytes.Buffer
+				curCol := 0
+				remainder := 0
+				shortfall := 0
+
+				for curCol < len(cols) || remainder > 0 {
+					curBuf, err := sess.buf.NextBuf()
+					if err != nil {
+						out <- RawResult{Err: fmt.Errorf("error reading row data: %v", err)}
+						return
+					}
+					// fmt.Printf("%#v\n", curBuf)
+
+					if remainder > len(curBuf) {
+						remainder -= len(curBuf)
+						dataBuf.Write(curBuf)
+						sess.buf.Advance(len(curBuf))
+						continue
+					}
+					limit := remainder
+					remainder = 0
+					for curCol < len(cols) && limit < len(curBuf) {
+						if shortfall > 0 {
+							// assert limit, remainder == 0
+							if shortfall > len(curBuf) {
+								shortfall -= len(curBuf)
+								limit = len(curBuf)
+								break
+							} else {
+								dataBuf.Write(curBuf[:shortfall])
+								curBuf = curBuf[shortfall:]
+								sess.buf.Advance(shortfall)
+								shortfall = 0
+
+								switch cols[curCol].ti.FixedSize {
+								case 1:
+									panic("Should never happen")
+								case 2:
+									b := dataBuf.Bytes()
+									l := len(b)
+									len := uint16(b[l - 2]) | uint16(b[l - 1]) << 8
+									// fmt.Printf("%d (s) short value %d %d %d\n", curCol, int(len), dataBuf.Len(), limit)
+									if len != 0xffff {
+										limit += int(len)
+									}
+								default:
+									panic("TBD")
+								}
+
+								curCol++
+								if limit > len(curBuf) {
+									remainder = limit - len(curBuf)
+									// fmt.Printf("value has %d byte remainder\n", remainder)
+									limit = len(curBuf)
+									break
+								}
+								continue
+							}
+						} else if cols[curCol].ti.VarSize && limit + cols[curCol].ti.FixedSize > len(curBuf) {
+							// we should only get here if we need at least 2 bytes but only have 1
+							shortfall = limit + cols[curCol].ti.FixedSize - len(curBuf)
+							// fmt.Printf("shortfall of %d bytes for fixed size data %d \n", shortfall, cols[curCol].ti.FixedSize)
+							limit = len(curBuf)
+							break
+						}
+
+						limit += cols[curCol].ti.FixedSize
+						if cols[curCol].ti.VarSize {
+							switch cols[curCol].ti.FixedSize {
+							case 1:
+								len := int(curBuf[limit - 1])
+								// fmt.Printf("%d byte value %d %d %d\n", curCol, len, dataBuf.Len(), limit)
+								limit += len
+							case 2:
+								len := uint16(curBuf[limit - 2]) | uint16(curBuf[limit - 1]) << 8
+								// fmt.Printf("%d short value %d %d %d\n", curCol, int(len), dataBuf.Len(), limit)
+								if len != 0xffff {
+									limit += int(len)
+								}
+							default:
+								panic("TBD")
+							}
+						}
+
+						curCol++
+						if limit > len(curBuf) {
+							remainder = limit - len(curBuf)
+							// fmt.Printf("value has %d byte remainder\n", remainder)
+							limit = len(curBuf)
+							break
+						}
+					}
+
+					dataBuf.Write(curBuf[:limit])
+					sess.buf.Advance(limit)
+					// fmt.Printf("added %d bytes, need %d %d\n", limit, remainder, shortfall)
+				}
+
+				// fmt.Printf("got row with %d bytes of data\n", dataBuf.Len())
+				out <- RawResult{Payload: dataBuf.Bytes()}
+			default:
+				// b, _ := sess.buf.NextBuf()
+				// fmt.Printf("%#v\n", b)
+				out <- RawResult{Err: fmt.Errorf("unexpected token in reply: got %v\n", tok)}
+				return
+			}
+		}
+	}()
+
+	return out
 }
 
 func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {

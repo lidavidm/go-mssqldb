@@ -3,6 +3,7 @@ package mssql
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 )
@@ -312,4 +313,24 @@ func (r *tdsBuffer) Read(buf []byte) (copied int, err error) {
 	copied = copy(buf, r.rbuf[r.rpos:r.rsize])
 	r.rpos += copied
 	return
+}
+
+func (r *tdsBuffer) NextBuf() ([]byte, error) {
+	if r.rpos == r.rsize {
+		if r.final {
+			return nil, io.EOF
+		}
+		err := r.readNextPacket()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return r.rbuf[r.rpos:r.rsize], nil
+}
+
+func (r *tdsBuffer) Advance(n int) {
+	r.rpos += n
+	if r.rpos > r.rsize {
+		badStreamPanic(fmt.Errorf("advance past end of buffer"))
+	}
 }
