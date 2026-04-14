@@ -3,6 +3,7 @@ package mssql
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -980,7 +981,8 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 	errs := make([]Error, 0, 5)
 	for tokens := 0; ; tokens += 1 {
 		token := token(sess.buf.byte())
-		sess.LogF(ctx, msdsn.LogDebug, "got token %v", token)
+		rbuf, rpos, rsize := sess.buf.Current()
+		sess.LogF(ctx, msdsn.LogDebug, "got token %v pos %d (packet length %d)", token, rpos, rsize)
 		switch token {
 		case tokenSSPI:
 			ch <- parseSSPIMsg(sess.buf)
@@ -1124,6 +1126,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 				}
 			}
 		default:
+			sess.LogF(ctx, msdsn.LogDebug, "got unknown token %v pos %d (packet length %d), packet: %s", token, rpos, rsize, base64.StdEncoding.EncodeToString(rbuf[:rsize]))
 			badStreamPanic(fmt.Errorf("unknown token type returned: %v", token))
 		}
 	}

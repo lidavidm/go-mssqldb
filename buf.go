@@ -313,3 +313,7 @@ func (r *tdsBuffer) Read(buf []byte) (copied int, err error) {
 	r.rpos += copied
 	return
 }
+
+func (r *tdsBuffer) Current() ([]byte, int, int) {
+	return r.rbuf, r.rpos - headerSize, r.rsize
+}
