@@ -102,6 +102,7 @@ type typeInfo struct {
 	XmlInfo   xmlInfo
 	Reader    func(ti *typeInfo, r *tdsBuffer, cryptoMeta *cryptoMetadata, encoding msdsn.EncodeParameters) (res interface{})
 	Writer    func(w io.Writer, ti typeInfo, buf []byte, encoding msdsn.EncodeParameters) (err error)
+	// For the raw parser.
 	FixedSize int
 	VarSize bool
 }

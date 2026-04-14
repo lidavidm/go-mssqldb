@@ -315,6 +315,7 @@ func (r *tdsBuffer) Read(buf []byte) (copied int, err error) {
 	return
 }
 
+// NextBuf returns the entire contents of the current packet.
 func (r *tdsBuffer) NextBuf() ([]byte, error) {
 	if r.rpos == r.rsize {
 		if r.final {
@@ -328,6 +329,7 @@ func (r *tdsBuffer) NextBuf() ([]byte, error) {
 	return r.rbuf[r.rpos:r.rsize], nil
 }
 
+// Advance directly consumes the given amount of the current packet.
 func (r *tdsBuffer) Advance(n int) {
 	r.rpos += n
 	if r.rpos > r.rsize {

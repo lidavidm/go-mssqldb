@@ -1259,6 +1259,7 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 	return s.queryContext(ctx, list)
 }
 
+// RawField is one field of the result set, without parsing into higher-level types.
 type RawField struct {
 	Name string
 	Nullable bool
@@ -1268,12 +1269,15 @@ type RawField struct {
 	Prec uint8
 }
 
+// RawResult is either a schema, an unparsed row, or an error.
 type RawResult struct {
 	Fields []RawField
 	Payload []byte
 	Err error
 }
 
+// RawReader allows retrieving query results without parsing, allowing
+// advanced applications to avoid allocating Go values.
 type RawReader interface {
 	QueryRaw(ctx context.Context, args []driver.NamedValue) chan RawResult
 }
@@ -1281,8 +1285,11 @@ type RawReader interface {
 func (s *Stmt) QueryRaw(ctx context.Context, args []driver.NamedValue) chan RawResult {
 	defer s.c.clearOuts()
 
+	// TODO: this needs to be configurable
 	out := make(chan RawResult, 64)
 
+	// TODO: much of this is common to the "regular" query path; how much
+	// of it can we consolidate?
 	if !s.c.connectionGood {
 		out <- RawResult{Err: driver.ErrBadConn}
 		close(out)
@@ -1313,6 +1320,7 @@ func (s *Stmt) QueryRaw(ctx context.Context, args []driver.NamedValue) chan RawR
 		return out
 	}
 
+	// TODO: factor this out
 	go func() {
 		defer close(out)
 
@@ -1405,6 +1413,10 @@ func (s *Stmt) QueryRaw(ctx context.Context, args []driver.NamedValue) chan RawR
 					}
 					limit := remainder
 					remainder = 0
+					// TODO: this logic is error-prone and
+					// messy. If we always parse the
+					// length from the buffer, we can
+					// probably save some complexity?
 					for curCol < len(cols) && limit < len(curBuf) {
 						if shortfall > 0 {
 							// assert limit, remainder == 0
@@ -1452,6 +1464,7 @@ func (s *Stmt) QueryRaw(ctx context.Context, args []driver.NamedValue) chan RawR
 
 						limit += cols[curCol].ti.FixedSize
 						if cols[curCol].ti.VarSize {
+							// TODO: We need to handle other lengths too.
 							switch cols[curCol].ti.FixedSize {
 							case 1:
 								len := int(curBuf[limit - 1])
