@@ -104,6 +104,13 @@ type typeInfo struct {
 	Writer    func(w io.Writer, ti typeInfo, buf []byte, encoding msdsn.EncodeParameters) (err error)
 }
 
+// SQLVariant is the decoded value and base type metadata for a SQL_VARIANT value.
+type SQLVariant struct {
+	BaseTypeID uint8
+	Value      any
+	Scale      uint8
+}
+
 // Common Language Runtime (CLR) Instances
 // http://msdn.microsoft.com/en-us/library/dd357962.aspx
 type udtInfo struct {
@@ -650,87 +657,95 @@ func readVariantTypeWithEncoding(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata, 
 	}
 	vartype := r.byte()
 	propbytes := int32(r.byte())
+	variant := SQLVariant{BaseTypeID: vartype}
+	valueSize := size - 2 - propbytes
 	switch vartype {
 	case typeGuid:
-		buf := make([]byte, size-2-propbytes)
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeGuid(buf, encoding)
+		variant.Value = decodeGuid(buf, encoding)
 	case typeBit:
-		return r.byte() != 0
+		variant.Value = r.byte() != 0
 	case typeInt1:
-		return int64(r.byte())
+		variant.Value = int64(r.byte())
 	case typeInt2:
-		return int64(int16(r.uint16()))
+		variant.Value = int64(int16(r.uint16()))
 	case typeInt4:
-		return int64(r.int32())
+		variant.Value = int64(r.int32())
 	case typeInt8:
-		return int64(r.uint64())
+		variant.Value = int64(r.uint64())
 	case typeDateTime:
-		buf := make([]byte, size-2-propbytes)
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeDateTime(buf, loc)
+		variant.Value = decodeDateTime(buf, loc)
 	case typeDateTim4:
-		buf := make([]byte, size-2-propbytes)
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeDateTim4(buf, loc)
+		variant.Value = decodeDateTim4(buf, loc)
 	case typeFlt4:
-		return float64(math.Float32frombits(r.uint32()))
+		variant.Value = float64(math.Float32frombits(r.uint32()))
 	case typeFlt8:
-		return math.Float64frombits(r.uint64())
+		variant.Value = math.Float64frombits(r.uint64())
 	case typeMoney4:
-		buf := make([]byte, size-2-propbytes)
+		variant.Scale = 4
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeMoney4(buf)
+		variant.Value = decodeMoney4(buf)
 	case typeMoney:
-		buf := make([]byte, size-2-propbytes)
+		variant.Scale = 4
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeMoney(buf)
+		variant.Value = decodeMoney(buf)
 	case typeDateN:
-		buf := make([]byte, size-2-propbytes)
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeDate(buf, loc)
+		variant.Value = decodeDate(buf, loc)
 	case typeTimeN:
 		scale := r.byte()
-		buf := make([]byte, size-2-propbytes)
+		variant.Scale = scale
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeTime(scale, buf, loc)
+		variant.Value = decodeTime(scale, buf, loc)
 	case typeDateTime2N:
 		scale := r.byte()
-		buf := make([]byte, size-2-propbytes)
+		variant.Scale = scale
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeDateTime2(scale, buf, loc)
+		variant.Value = decodeDateTime2(scale, buf, loc)
 	case typeDateTimeOffsetN:
 		scale := r.byte()
-		buf := make([]byte, size-2-propbytes)
+		variant.Scale = scale
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeDateTimeOffset(scale, buf)
+		variant.Value = decodeDateTimeOffset(scale, buf)
 	case typeBigVarBin, typeBigBinary:
-		r.uint16() // max length, ignoring
-		buf := make([]byte, size-2-propbytes)
+		r.uint16()
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return buf
+		variant.Value = buf
 	case typeDecimalN, typeNumericN:
 		prec := r.byte()
 		scale := r.byte()
-		buf := make([]byte, size-2-propbytes)
+		variant.Scale = scale
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeDecimal(prec, scale, buf)
+		variant.Value = decodeDecimal(prec, scale, buf)
 	case typeBigVarChar, typeBigChar:
 		col := readCollation(r)
-		r.uint16() // max length, ignoring
-		buf := make([]byte, size-2-propbytes)
+		r.uint16()
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeChar(col, buf)
+		variant.Value = decodeChar(col, buf)
 	case typeNVarChar, typeNChar:
-		_ = readCollation(r)
-		r.uint16() // max length, ignoring
-		buf := make([]byte, size-2-propbytes)
+		readCollation(r)
+		r.uint16()
+		buf := make([]byte, valueSize)
 		r.ReadFull(buf)
-		return decodeNChar(buf)
+		variant.Value = decodeNChar(buf)
 	default:
 		badStreamPanicf("Invalid variant typeid")
 	}
-	panic("shoulnd't get here")
+	return variant
 }
 
 // partially length prefixed stream

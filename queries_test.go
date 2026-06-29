@@ -19,7 +19,25 @@ import (
 
 	"github.com/microsoft/go-mssqldb/msdsn"
 	"github.com/shopspring/decimal"
+	"github.com/stretchr/testify/require"
 )
+
+func sqlVariantValue(value interface{}, baseTypeID uint8) SQLVariant {
+	return SQLVariant{BaseTypeID: baseTypeID, Value: value}
+}
+
+func requireValueEqual(t *testing.T, expected, actual interface{}, sql string) {
+	t.Helper()
+	if expectedVariant, ok := expected.(SQLVariant); ok {
+		actualVariant, ok := actual.(SQLVariant)
+		require.True(t, ok, "value mismatch for %s: expected SQLVariant, got %T", sql, actual)
+		require.Equal(t, expectedVariant.BaseTypeID, actualVariant.BaseTypeID, "base type ID mismatch for %s", sql)
+		require.Equal(t, expectedVariant.Value, actualVariant.Value, "variant value mismatch for %s", sql)
+		require.Equal(t, expectedVariant.Scale, actualVariant.Scale, "scale mismatch for %s", sql)
+		return
+	}
+	require.Equal(t, expected, actual, "value mismatch for %s", sql)
+}
 
 func driverWithProcess(t *testing.T, tl Logger) *Driver {
 	return &Driver{
@@ -118,26 +136,26 @@ func testSelect(t *testing.T, guidConversion bool) {
 			{"cast(cast(N'chào' as nvarchar(max)) collate Vietnamese_CI_AI as varchar(max))", "chào"},              // cp1258
 			{fmt.Sprintf("cast(N'%s' as nvarchar(max))", longstr), longstr},
 			{"cast(NULL as sql_variant)", nil},
-			{"cast(cast(0x6F9619FF8B86D011B42D00C04FC964FF as uniqueidentifier) as sql_variant)", expectedGuid},
-			{"cast(cast(1 as bit) as sql_variant)", true},
-			{"cast(cast(10 as tinyint) as sql_variant)", int64(10)},
-			{"cast(cast(-10 as smallint) as sql_variant)", int64(-10)},
-			{"cast(cast(-20 as int) as sql_variant)", int64(-20)},
-			{"cast(cast(-20 as bigint) as sql_variant)", int64(-20)},
-			{"cast(cast('2000-01-01' as datetime) as sql_variant)", time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)},
+			{"cast(cast(0x6F9619FF8B86D011B42D00C04FC964FF as uniqueidentifier) as sql_variant)", sqlVariantValue(expectedGuid, typeGuid)},
+			{"cast(cast(1 as bit) as sql_variant)", sqlVariantValue(true, typeBit)},
+			{"cast(cast(10 as tinyint) as sql_variant)", sqlVariantValue(int64(10), typeInt1)},
+			{"cast(cast(-10 as smallint) as sql_variant)", sqlVariantValue(int64(-10), typeInt2)},
+			{"cast(cast(-20 as int) as sql_variant)", sqlVariantValue(int64(-20), typeInt4)},
+			{"cast(cast(-20 as bigint) as sql_variant)", sqlVariantValue(int64(-20), typeInt8)},
+			{"cast(cast('2000-01-01' as datetime) as sql_variant)", sqlVariantValue(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), typeDateTime)},
 			{"cast(cast('2000-01-01T12:13:00' as smalldatetime) as sql_variant)",
-				time.Date(2000, 1, 1, 12, 13, 0, 0, time.UTC)},
-			{"cast(cast(0.125 as real) as sql_variant)", float64(0.125)},
-			{"cast(cast(0.125 as float) as sql_variant)", float64(0.125)},
-			{"cast(cast(1.2345 as smallmoney) as sql_variant)", []byte("1.2345")},
-			{"cast(cast(1.2345 as money) as sql_variant)", []byte("1.2345")},
-			{"cast(cast(0x1234 as varbinary(2)) as sql_variant)", []byte{0x12, 0x34}},
-			{"cast(cast(0x1234 as binary(2)) as sql_variant)", []byte{0x12, 0x34}},
-			{"cast(cast(-0.5 as decimal(18,1)) as sql_variant)", []byte("-0.5")},
-			{"cast(cast(-0.5 as numeric(18,1)) as sql_variant)", []byte("-0.5")},
-			{"cast(cast('abc' as varchar(3)) as sql_variant)", "abc"},
-			{"cast(cast('abc' as char(3)) as sql_variant)", "abc"},
-			{"cast(N'abc' as sql_variant)", "abc"},
+				sqlVariantValue(time.Date(2000, 1, 1, 12, 13, 0, 0, time.UTC), typeDateTim4)},
+			{"cast(cast(0.125 as real) as sql_variant)", sqlVariantValue(float64(0.125), typeFlt4)},
+			{"cast(cast(0.125 as float) as sql_variant)", sqlVariantValue(float64(0.125), typeFlt8)},
+			{"cast(cast(1.2345 as smallmoney) as sql_variant)", SQLVariant{BaseTypeID: typeMoney4, Value: []byte("1.2345"), Scale: 4}},
+			{"cast(cast(1.2345 as money) as sql_variant)", SQLVariant{BaseTypeID: typeMoney, Value: []byte("1.2345"), Scale: 4}},
+			{"cast(cast(0x1234 as varbinary(2)) as sql_variant)", SQLVariant{BaseTypeID: typeBigVarBin, Value: []byte{0x12, 0x34}}},
+			{"cast(cast(0x1234 as binary(2)) as sql_variant)", SQLVariant{BaseTypeID: typeBigBinary, Value: []byte{0x12, 0x34}}},
+			{"cast(cast(-0.5 as decimal(18,1)) as sql_variant)", SQLVariant{BaseTypeID: typeDecimalN, Value: []byte("-0.5"), Scale: 1}},
+			{"cast(cast(-0.5 as numeric(18,1)) as sql_variant)", SQLVariant{BaseTypeID: typeNumericN, Value: []byte("-0.5"), Scale: 1}},
+			{"cast(cast('abc' as varchar(3)) as sql_variant)", SQLVariant{BaseTypeID: typeBigVarChar, Value: "abc"}},
+			{"cast(cast('abc' as char(3)) as sql_variant)", SQLVariant{BaseTypeID: typeBigChar, Value: "abc"}},
+			{"cast(N'abc' as sql_variant)", SQLVariant{BaseTypeID: typeNVarChar, Value: "abc"}},
 			{"cast('/' as hierarchyid)", []byte{}},
 		}
 
@@ -157,22 +175,7 @@ func testSelect(t *testing.T, guidConversion bool) {
 					t.Error("Scan failed:", test.sql, err.Error())
 					return
 				}
-				var same bool
-				switch decodedval := retval.(type) {
-				case []byte:
-					switch decodedvaltest := test.val.(type) {
-					case []byte:
-						same = bytes.Equal(decodedval, decodedvaltest)
-					default:
-						same = false
-					}
-				default:
-					same = retval == test.val
-				}
-				if !same {
-					t.Errorf("Values don't match '%s' '%s' for test: %s", retval, test.val, test.sql)
-					return
-				}
+				requireValueEqual(t, test.val, retval, test.sql)
 			})
 		}
 	})
@@ -267,13 +270,13 @@ func TestSelect(t *testing.T) {
 func TestSelectDateTimeOffset(t *testing.T) {
 	type testStruct struct {
 		sql string
-		val time.Time
+		val interface{}
 	}
 	values := []testStruct{
 		{"cast('2010-11-15T11:56:45.123+14:00' as datetimeoffset(3))",
 			time.Date(2010, 11, 15, 11, 56, 45, 123000000, time.FixedZone("", 14*60*60))},
 		{"cast(cast('2010-11-15T11:56:45.123-14:00' as datetimeoffset(3)) as sql_variant)",
-			time.Date(2010, 11, 15, 11, 56, 45, 123000000, time.FixedZone("", -14*60*60))},
+			SQLVariant{BaseTypeID: typeDateTimeOffsetN, Value: time.Date(2010, 11, 15, 11, 56, 45, 123000000, time.FixedZone("", -14*60*60)), Scale: 3}},
 		{"cast('0001-01-01T00:00:00.0000000+00:00' as datetimeoffset(7))",
 			time.Date(1, 1, 1, 0, 0, 0, 0, time.FixedZone("", 0))},
 		{"cast('2010-11-12T13:14:15.123+00:00' as datetimeoffset(7))",
@@ -293,13 +296,23 @@ func TestSelectDateTimeOffset(t *testing.T) {
 			t.Error("Scan failed:", test.sql, err.Error())
 			continue
 		}
+		expectedDate := test.val
+		if expectedVariant, ok := test.val.(SQLVariant); ok {
+			actualVariant, ok := retval.(SQLVariant)
+			require.True(t, ok, "expected SQLVariant for test: %s", test.sql)
+			require.Equal(t, expectedVariant.BaseTypeID, actualVariant.BaseTypeID)
+			require.Equal(t, expectedVariant.Scale, actualVariant.Scale)
+			expectedDate = expectedVariant.Value
+			retval = actualVariant.Value
+		}
 		retvalDate := retval.(time.Time)
-		if retvalDate.UTC() != test.val.UTC() {
-			t.Errorf("UTC values don't match '%v' '%v' for test: %s", retvalDate, test.val, test.sql)
+		expectedTime := expectedDate.(time.Time)
+		if retvalDate.UTC() != expectedTime.UTC() {
+			t.Errorf("UTC values don't match '%v' '%v' for test: %s", retvalDate, expectedTime, test.sql)
 			continue
 		}
-		if retvalDate.String() != test.val.String() {
-			t.Errorf("Locations don't match '%v' '%v' for test: %s", retvalDate.String(), test.val.String(), test.sql)
+		if retvalDate.String() != expectedTime.String() {
+			t.Errorf("Locations don't match '%v' '%v' for test: %s", retvalDate.String(), expectedTime.String(), test.sql)
 			continue
 		}
 	}
@@ -354,11 +367,11 @@ func TestSelectNewTypes(t *testing.T) {
 		{"cast('2010-11-15T11:56:45' as datetime2(0))",
 			time.Date(2010, 11, 15, 11, 56, 45, 0, time.UTC)},
 		{"cast(cast('2000-01-01' as date) as sql_variant)",
-			time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)},
+			sqlVariantValue(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), typeDateN)},
 		{"cast(cast('00:00:45.123' as time(3)) as sql_variant)",
-			time.Date(1, 1, 1, 00, 00, 45, 123000000, time.UTC)},
+			SQLVariant{BaseTypeID: typeTimeN, Value: time.Date(1, 1, 1, 00, 00, 45, 123000000, time.UTC), Scale: 3}},
 		{"cast(cast('2010-11-15T11:56:45.123' as datetime2(3)) as sql_variant)",
-			time.Date(2010, 11, 15, 11, 56, 45, 123000000, time.UTC)},
+			SQLVariant{BaseTypeID: typeDateTime2N, Value: time.Date(2010, 11, 15, 11, 56, 45, 123000000, time.UTC), Scale: 3}},
 		{"cast('9999-12-31T23:59:59.9999999' as datetime2(7))",
 			time.Date(9999, 12, 31, 23, 59, 59, 999999900, time.UTC)},
 		{"cast(null as datetime2(3))", nil},
@@ -3014,7 +3027,7 @@ func TestAdminConnection(t *testing.T) {
 	}
 	conn, _ := open(t)
 	defer conn.Close()
-	row := conn.QueryRow(`SELECT  c.net_transport 
+	row := conn.QueryRow(`SELECT  c.net_transport
 	FROM sys.dm_exec_connections c
 	JOIN sys.tcp_endpoints e ON c.endpoint_id = e.endpoint_id
 	WHERE c.session_id = @@SPID AND e.name = 'Dedicated Admin Connection'`)

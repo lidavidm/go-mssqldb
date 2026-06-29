@@ -1,12 +1,127 @@
 package mssql
 
 import (
+	"bytes"
+	"encoding/binary"
+	"math"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/microsoft/go-mssqldb/msdsn"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func variantReadBuffer(t *testing.T, baseType byte, props []byte, value []byte) *tdsBuffer {
+	t.Helper()
+	require.LessOrEqual(t, len(props), 0xff)
+
+	var buf bytes.Buffer
+	require.NoError(t, binary.Write(&buf, binary.LittleEndian, int32(2+len(props)+len(value))))
+	require.NoError(t, buf.WriteByte(baseType))
+	require.NoError(t, buf.WriteByte(byte(len(props))))
+	_, err := buf.Write(props)
+	require.NoError(t, err)
+	_, err = buf.Write(value)
+	require.NoError(t, err)
+
+	return &tdsBuffer{
+		packetSize: buf.Len(),
+		rbuf:       buf.Bytes(),
+		rsize:      buf.Len(),
+		final:      true,
+	}
+}
+
+func variantNullReadBuffer(t *testing.T) *tdsBuffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+	require.NoError(t, binary.Write(&buf, binary.LittleEndian, int32(0)))
+	return &tdsBuffer{
+		packetSize: buf.Len(),
+		rbuf:       buf.Bytes(),
+		rsize:      buf.Len(),
+		final:      true,
+	}
+}
+
+func TestReadVariantTypeWithEncodingReturnsSQLVariantMetadata(t *testing.T) {
+	assert.Nil(t, readVariantTypeWithEncoding(nil, variantNullReadBuffer(t), nil, msdsn.EncodeParameters{}))
+
+	intValue := make([]byte, 4)
+	binary.LittleEndian.PutUint32(intValue, uint32(0xfffffff6))
+	realValue := make([]byte, 4)
+	binary.LittleEndian.PutUint32(realValue, math.Float32bits(0.125))
+	decimalValue := []byte{1, 0xd2, 0x04, 0x00, 0x00}
+	timeValue := encodeTime(0, 0, 45, 123000000, 3)
+	varbinaryProps := []byte{0x02, 0x00}
+	varcharProps := []byte{0x09, 0x04, 0x00, 0x00, 0x34, 0x03, 0x00}
+
+	tests := []struct {
+		name string
+		got  any
+		want SQLVariant
+	}{
+		{
+			name: "int width",
+			got:  readVariantTypeWithEncoding(nil, variantReadBuffer(t, typeInt4, nil, intValue), nil, msdsn.EncodeParameters{}),
+			want: SQLVariant{
+				BaseTypeID: typeInt4,
+				Value:      int64(-10),
+			},
+		},
+		{
+			name: "real width",
+			got:  readVariantTypeWithEncoding(nil, variantReadBuffer(t, typeFlt4, nil, realValue), nil, msdsn.EncodeParameters{}),
+			want: SQLVariant{
+				BaseTypeID: typeFlt4,
+				Value:      float64(0.125),
+			},
+		},
+		{
+			name: "decimal scale",
+			got:  readVariantTypeWithEncoding(nil, variantReadBuffer(t, typeDecimalN, []byte{5, 2}, decimalValue), nil, msdsn.EncodeParameters{}),
+			want: SQLVariant{
+				BaseTypeID: typeDecimalN,
+				Value:      []byte("12.34"),
+				Scale:      2,
+			},
+		},
+		{
+			name: "time scale",
+			got:  readVariantTypeWithEncoding(nil, variantReadBuffer(t, typeTimeN, []byte{3}, timeValue), nil, msdsn.EncodeParameters{}),
+			want: SQLVariant{
+				BaseTypeID: typeTimeN,
+				Value:      time.Date(1, 1, 1, 0, 0, 45, 123000000, time.UTC),
+				Scale:      3,
+			},
+		},
+		{
+			name: "binary value",
+			got:  readVariantTypeWithEncoding(nil, variantReadBuffer(t, typeBigVarBin, varbinaryProps, []byte{0x12, 0x34}), nil, msdsn.EncodeParameters{}),
+			want: SQLVariant{
+				BaseTypeID: typeBigVarBin,
+				Value:      []byte{0x12, 0x34},
+			},
+		},
+		{
+			name: "varchar value",
+			got:  readVariantTypeWithEncoding(nil, variantReadBuffer(t, typeBigVarChar, varcharProps, []byte("abc")), nil, msdsn.EncodeParameters{}),
+			want: SQLVariant{
+				BaseTypeID: typeBigVarChar,
+				Value:      "abc",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.got)
+		})
+	}
+}
 
 func TestMakeGoLangScanType(t *testing.T) {
 	tests := []struct {
