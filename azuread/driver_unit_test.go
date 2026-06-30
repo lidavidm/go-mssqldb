@@ -46,7 +46,7 @@ func TestNewConnectorInvalidDSN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewConnector(tt.dsn)
+			_, _, err := NewConnector(tt.dsn)
 			if tt.wantErr {
 				assert.Error(t, err, "Expected error")
 			}
@@ -92,7 +92,7 @@ func TestNewConnectorWithValidDSN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			connector, err := NewConnector(tt.dsn)
+			connector, _, err := NewConnector(tt.dsn)
 			if tt.wantErr {
 				assert.Error(t, err, "Expected error")
 			} else {

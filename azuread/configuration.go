@@ -97,16 +97,16 @@ func parse(dsn string) (*azureFedAuthConfig, error) {
 // adoNetAuthMap matches the string constants from
 // Microsoft.Data.SqlClient's DbConnectionStringUtilities.
 var adoNetAuthMap = map[string]string{
-	"sql password":                        "", // SQL auth, no fedauth needed
-	"active directory password":           ActiveDirectoryPassword,
-	"active directory integrated":         ActiveDirectoryIntegrated,
-	"active directory interactive":        ActiveDirectoryInteractive,
-	"active directory service principal":  ActiveDirectoryServicePrincipal,
-	"active directory device code flow":   ActiveDirectoryDeviceCode,
-	"active directory managed identity":   ActiveDirectoryManagedIdentity,
-	"active directory msi":                ActiveDirectoryMSI,
-	"active directory default":            ActiveDirectoryDefault,
-	"active directory workload identity":  ActiveDirectoryWorkloadIdentity,
+	"sql password":                       "", // SQL auth, no fedauth needed
+	"active directory password":          ActiveDirectoryPassword,
+	"active directory integrated":        ActiveDirectoryIntegrated,
+	"active directory interactive":       ActiveDirectoryInteractive,
+	"active directory service principal": ActiveDirectoryServicePrincipal,
+	"active directory device code flow":  ActiveDirectoryDeviceCode,
+	"active directory managed identity":  ActiveDirectoryManagedIdentity,
+	"active directory msi":               ActiveDirectoryMSI,
+	"active directory default":           ActiveDirectoryDefault,
+	"active directory workload identity": ActiveDirectoryWorkloadIdentity,
 }
 
 func (p *azureFedAuthConfig) validateParameters(params map[string]string) error {
@@ -338,17 +338,17 @@ func splitAuthorityAndTenant(authorityURL string) (string, string) {
 	return authority, tenant
 }
 
-func (p *azureFedAuthConfig) provideActiveDirectoryToken(ctx context.Context, serverSPN, stsURL string) (string, error) {
+func (p *azureFedAuthConfig) GetAzureCred(ctx context.Context, stsURL string) (azcore.TokenCredential, error) {
 	var cred azcore.TokenCredential
 	var err error
-	authority, tenant := splitAuthorityAndTenant(stsURL)
-	// client secret connection strings may override the server tenant
-	if p.tenantID != "" {
-		tenant = p.tenantID
-	}
-	scope := serverSPN
-	if !strings.HasSuffix(serverSPN, scopeDefaultSuffix) {
-		scope = serverSPN + scopeDefaultSuffix
+	var authority string
+	var tenant string
+	if stsURL != "" {
+		authority, tenant = splitAuthorityAndTenant(stsURL)
+		// client secret connection strings may override the server tenant
+		if p.tenantID != "" {
+			tenant = p.tenantID
+		}
 	}
 
 	switch p.fedAuthWorkflow {
@@ -377,8 +377,6 @@ func (p *azureFedAuthConfig) provideActiveDirectoryToken(ctx context.Context, se
 			}
 			cred, err = azidentity.NewClientSecretCredential(tenant, p.clientID, p.clientSecret, options)
 		}
-	case ActiveDirectoryServicePrincipalAccessToken:
-		return p.password, nil
 	case ActiveDirectoryPassword:
 		options := &azidentity.UsernamePasswordCredentialOptions{
 			AdditionallyAllowedTenants: p.additionallyAllowedTenants,
@@ -498,8 +496,26 @@ func (p *azureFedAuthConfig) provideActiveDirectoryToken(ctx context.Context, se
 	}
 
 	if err != nil {
+		return nil, err
+	}
+	return cred, err
+}
+
+func (p *azureFedAuthConfig) provideActiveDirectoryToken(ctx context.Context, serverSPN, stsURL string) (string, error) {
+	if p.fedAuthWorkflow == ActiveDirectoryServicePrincipalAccessToken {
+		return p.password, nil
+	}
+
+	cred, err := p.GetAzureCred(ctx, stsURL)
+	if err != nil {
 		return "", err
 	}
+
+	scope := serverSPN
+	if !strings.HasSuffix(serverSPN, scopeDefaultSuffix) {
+		scope = serverSPN + scopeDefaultSuffix
+	}
+
 	opts := policy.TokenRequestOptions{Scopes: []string{scope}}
 	tk, err := cred.GetToken(ctx, opts)
 	if err != nil {
