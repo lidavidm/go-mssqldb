@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	mssql "github.com/microsoft/go-mssqldb"
 )
 
@@ -24,7 +25,7 @@ type Driver struct {
 
 // Open returns a new connection to the database.
 func (d *Driver) Open(dsn string) (driver.Conn, error) {
-	c, err := NewConnector(dsn)
+	c, _, err := NewConnector(dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -34,13 +35,14 @@ func (d *Driver) Open(dsn string) (driver.Conn, error) {
 
 // NewConnector creates a new connector from a DSN.
 // The returned connector may be used with sql.OpenDB.
-func NewConnector(dsn string) (*mssql.Connector, error) {
+func NewConnector(dsn string) (*mssql.Connector, AzureTokenCredentialFactory, error) {
 
 	config, err := parse(dsn)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return newConnectorConfig(config)
+	conn, err := newConnectorConfig(config)
+	return conn, config, err
 }
 
 // newConnectorConfig creates a Connector from config.
@@ -63,4 +65,8 @@ func newConnectorConfig(config *azureFedAuthConfig) (*mssql.Connector, error) {
 	default:
 		return mssql.NewConnectorConfig(config.mssqlConfig), nil
 	}
+}
+
+type AzureTokenCredentialFactory interface {
+	GetAzureCred(ctx context.Context, stsURL string) (azcore.TokenCredential, error)
 }
