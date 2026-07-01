@@ -354,6 +354,15 @@ func (b *Bulk) makeParam(val DataValue, col columnStruct) (res param, err error)
 	res.ti.TypeId = col.ti.TypeId
 	loc := getTimezone(b.cn)
 
+	if val == nil {
+		res.ti.Size = 0
+		return
+	}
+
+	if col.ti.TypeId == typeVariant {
+		return b.makeVariantParam(val, col)
+	}
+
 	switch valuer := val.(type) {
 	case Money[shopspring.Decimal]:
 		return b.makeParam(valuer.Decimal, col)
@@ -691,6 +700,380 @@ func (b *Bulk) makeParam(val DataValue, col columnStruct) (res param, err error)
 	}
 	return
 
+}
+
+func (b *Bulk) makeVariantParam(val DataValue, col columnStruct) (res param, err error) {
+	res.ti.TypeId = typeVariant
+	res.ti.Size = col.ti.Size
+
+	if val == nil {
+		res.ti.Size = 0
+		return
+	}
+
+	switch valuer := val.(type) {
+	case SQLVariant:
+		res.buffer, err = b.encodeVariantPayload(valuer, true)
+	case Money[shopspring.Decimal]:
+		res.buffer, err = b.encodeVariantPayload(SQLVariant{
+			BaseTypeID: typeMoney,
+			Value:      valuer.Decimal.String(),
+			Scale:      4,
+		}, true)
+	case Money[shopspring.NullDecimal]:
+		if !valuer.Decimal.Valid {
+			res.ti.Size = 0
+			return
+		}
+		res.buffer, err = b.encodeVariantPayload(SQLVariant{
+			BaseTypeID: typeMoney,
+			Value:      valuer.Decimal.Decimal.String(),
+			Scale:      4,
+		}, true)
+	case shopspring.Decimal:
+		scale, scaleErr := variantDecimalScaleFromShopspring(valuer)
+		if scaleErr != nil {
+			err = scaleErr
+			return
+		}
+		res.buffer, err = b.encodeVariantPayload(SQLVariant{
+			BaseTypeID: typeDecimalN,
+			Value:      valuer.String(),
+			Scale:      scale,
+		}, true)
+	case shopspring.NullDecimal:
+		if !valuer.Valid {
+			res.ti.Size = 0
+			return
+		}
+		scale, scaleErr := variantDecimalScaleFromShopspring(valuer.Decimal)
+		if scaleErr != nil {
+			err = scaleErr
+			return
+		}
+		res.buffer, err = b.encodeVariantPayload(SQLVariant{
+			BaseTypeID: typeDecimalN,
+			Value:      valuer.Decimal.String(),
+			Scale:      scale,
+		}, true)
+	case driver.Valuer:
+		converted, convertErr := driver.DefaultParameterConverter.ConvertValue(valuer)
+		if convertErr != nil {
+			err = convertErr
+			return
+		}
+		if converted == nil {
+			res.ti.Size = 0
+			return
+		}
+		return b.makeVariantParam(converted, col)
+	default:
+		var variant SQLVariant
+		variant, err = inferVariantValue(val)
+		if err != nil {
+			return
+		}
+		res.buffer, err = b.encodeVariantPayload(variant, false)
+	}
+	if err != nil {
+		return
+	}
+	res.ti.Size = len(res.buffer)
+	return
+}
+
+func (b *Bulk) encodeVariantPayload(variant SQLVariant, explicit bool) ([]byte, error) {
+	if variant.Value == nil {
+		return nil, nil
+	}
+
+	baseType, value, err := variantBaseTypeInfo(variant, explicit)
+	if err != nil {
+		return nil, err
+	}
+	baseParam, err := b.makeParam(value, columnStruct{ti: baseType})
+	if err != nil {
+		return nil, err
+	}
+	baseParam.ti.TypeId = baseType.TypeId
+	baseParam.ti.Prec = baseType.Prec
+	baseParam.ti.Scale = baseType.Scale
+	baseParam.ti.Collation = baseType.Collation
+
+	props, err := variantProperties(baseParam.ti)
+	if err != nil {
+		return nil, err
+	}
+	if len(props) > 0xff {
+		return nil, fmt.Errorf("mssql: sql_variant base type %#x has too many property bytes: %d", baseType.TypeId, len(props))
+	}
+
+	var payload bytes.Buffer
+	payload.WriteByte(baseType.TypeId)
+	payload.WriteByte(byte(len(props)))
+	payload.Write(props)
+	payload.Write(baseParam.buffer)
+	return payload.Bytes(), nil
+}
+
+func inferVariantValue(val DataValue) (SQLVariant, error) {
+	switch v := val.(type) {
+	case bool:
+		return SQLVariant{BaseTypeID: typeBit, Value: v}, nil
+	case byte:
+		return SQLVariant{BaseTypeID: typeInt1, Value: int64(v)}, nil
+	case int8:
+		return SQLVariant{BaseTypeID: typeInt2, Value: int64(v)}, nil
+	case int16:
+		return SQLVariant{BaseTypeID: typeInt2, Value: int64(v)}, nil
+	case int32:
+		return SQLVariant{BaseTypeID: typeInt4, Value: int64(v)}, nil
+	case int:
+		if v >= -1<<31 && v <= 1<<31-1 {
+			return SQLVariant{BaseTypeID: typeInt4, Value: int64(v)}, nil
+		}
+		return SQLVariant{BaseTypeID: typeInt8, Value: int64(v)}, nil
+	case int64:
+		return SQLVariant{BaseTypeID: typeInt8, Value: v}, nil
+	case float32:
+		return SQLVariant{BaseTypeID: typeFlt4, Value: float64(v)}, nil
+	case float64:
+		return SQLVariant{BaseTypeID: typeFlt8, Value: v}, nil
+	case string:
+		return SQLVariant{BaseTypeID: typeNVarChar, Value: v}, nil
+	case []byte:
+		return SQLVariant{BaseTypeID: typeBigVarBin, Value: v}, nil
+	case time.Time:
+		return SQLVariant{BaseTypeID: typeDateTimeOffsetN, Value: v, Scale: 7}, nil
+	default:
+		return SQLVariant{}, fmt.Errorf("mssql: unsupported sql_variant value type %T", val)
+	}
+}
+
+func variantBaseTypeInfo(variant SQLVariant, explicit bool) (typeInfo, any, error) {
+	ti := typeInfo{TypeId: variant.BaseTypeID}
+	value := variant.Value
+	var err error
+
+	switch variant.BaseTypeID {
+	case typeGuid:
+		guid, ok := value.([]byte)
+		if !ok {
+			return ti, nil, fmt.Errorf("mssql: invalid value type for sql_variant uniqueidentifier: %T", value)
+		}
+		if len(guid) != 16 {
+			return ti, nil, fmt.Errorf("mssql: invalid sql_variant uniqueidentifier length: %d", len(guid))
+		}
+		ti.Size = 16
+	case typeBit:
+		ti.Size = 1
+	case typeInt1:
+		ti.Size = 1
+		value, err = variantInt64Value(value)
+		if err != nil {
+			return ti, nil, err
+		}
+	case typeInt2:
+		ti.Size = 2
+		value, err = variantInt64Value(value)
+		if err != nil {
+			return ti, nil, err
+		}
+	case typeInt4:
+		ti.Size = 4
+		value, err = variantInt64Value(value)
+		if err != nil {
+			return ti, nil, err
+		}
+	case typeInt8:
+		ti.Size = 8
+		value, err = variantInt64Value(value)
+		if err != nil {
+			return ti, nil, err
+		}
+	case typeDateTime:
+		ti.Size = 8
+	case typeDateTim4:
+		ti.Size = 4
+	case typeFlt4:
+		ti.Size = 4
+	case typeFlt8:
+		ti.Size = 8
+	case typeMoney4:
+		ti.Size = 4
+		value = variantStringValue(value)
+	case typeMoney:
+		ti.Size = 8
+		value = variantStringValue(value)
+	case typeDateN:
+		ti.Size = 3
+	case typeTimeN:
+		ti.Scale = variantScale(variant.Scale, explicit)
+		ti.Size = calcTimeSize(int(ti.Scale))
+	case typeDateTime2N:
+		ti.Scale = variantScale(variant.Scale, explicit)
+		ti.Size = calcTimeSize(int(ti.Scale)) + 3
+	case typeDateTimeOffsetN:
+		ti.Scale = variantScale(variant.Scale, explicit)
+		ti.Size = calcTimeSize(int(ti.Scale)) + 5
+	case typeBigVarBin, typeBigBinary:
+		bytesValue, ok := value.([]byte)
+		if !ok {
+			return ti, nil, fmt.Errorf("mssql: invalid value type for sql_variant binary: %T", value)
+		}
+		ti.Size = len(bytesValue)
+	case typeDecimalN, typeNumericN:
+		strValue, ok := variantStringValue(value).(string)
+		if !ok {
+			return ti, nil, fmt.Errorf("mssql: invalid value type for sql_variant decimal: %T", value)
+		}
+		scale := variant.Scale
+		if scale == 0 {
+			var err error
+			scale, err = variantDecimalScaleFromString(strValue)
+			if err != nil {
+				return ti, nil, err
+			}
+		}
+		prec, err := variantDecimalPrecision(strValue, scale)
+		if err != nil {
+			return ti, nil, err
+		}
+		ti.Prec = prec
+		ti.Scale = scale
+		value = strValue
+	case typeBigVarChar, typeBigChar:
+		strValue, ok := variantStringValue(value).(string)
+		if !ok {
+			return ti, nil, fmt.Errorf("mssql: invalid value type for sql_variant varchar: %T", value)
+		}
+		bytesValue := []byte(strValue)
+		ti.Collation = utf8VariantCollation
+		ti.Size = len(bytesValue)
+		value = bytesValue
+	case typeNVarChar, typeNChar:
+		strValue, ok := variantStringValue(value).(string)
+		if !ok {
+			return ti, nil, fmt.Errorf("mssql: invalid value type for sql_variant nvarchar: %T", value)
+		}
+		bytesValue := str2ucs2(strValue)
+		ti.Collation = utf8VariantCollation
+		ti.Size = len(bytesValue)
+		value = bytesValue
+	default:
+		return ti, nil, fmt.Errorf("mssql: unsupported sql_variant base type %#x", variant.BaseTypeID)
+	}
+
+	return ti, value, nil
+}
+
+func variantScale(scale uint8, explicit bool) uint8 {
+	if explicit || scale != 0 {
+		return scale
+	}
+	return 7
+}
+
+func variantInt64Value(value any) (int64, error) {
+	switch v := value.(type) {
+	case byte:
+		return int64(v), nil
+	case int8:
+		return int64(v), nil
+	case int16:
+		return int64(v), nil
+	case int32:
+		return int64(v), nil
+	case int:
+		return int64(v), nil
+	case int64:
+		return v, nil
+	default:
+		return 0, fmt.Errorf("mssql: invalid value type for sql_variant integer: %T", value)
+	}
+}
+
+func variantStringValue(value any) any {
+	switch v := value.(type) {
+	case []byte:
+		return string(v)
+	default:
+		return value
+	}
+}
+
+func variantDecimalScaleFromShopspring(value shopspring.Decimal) (uint8, error) {
+	exponent := value.Exponent()
+	if exponent >= 0 {
+		return 0, nil
+	}
+	scale := -exponent
+	if scale > 38 {
+		return 0, fmt.Errorf("mssql: sql_variant decimal scale out of range: %d", scale)
+	}
+	return uint8(scale), nil
+}
+
+func variantDecimalScaleFromString(value string) (uint8, error) {
+	value = strings.TrimSpace(value)
+	dot := strings.IndexByte(value, '.')
+	if dot < 0 {
+		return 0, nil
+	}
+	scale := len(value) - dot - 1
+	if scale > 38 {
+		return 0, fmt.Errorf("mssql: sql_variant decimal scale out of range: %d", scale)
+	}
+	return uint8(scale), nil
+}
+
+func variantDecimalPrecision(value string, scale uint8) (uint8, error) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "+")
+	value = strings.TrimPrefix(value, "-")
+	value = strings.ReplaceAll(value, ".", "")
+	value = strings.TrimLeft(value, "0")
+
+	precision := len(value)
+	if precision == 0 {
+		precision = 1
+	}
+	if precision < int(scale) {
+		precision = int(scale)
+	}
+	if precision > 38 {
+		return 0, fmt.Errorf("mssql: sql_variant decimal precision out of range: %d", precision)
+	}
+	return uint8(precision), nil
+}
+
+func variantProperties(ti typeInfo) ([]byte, error) {
+	var props bytes.Buffer
+	switch ti.TypeId {
+	case typeDecimalN, typeNumericN:
+		props.WriteByte(ti.Prec)
+		props.WriteByte(ti.Scale)
+	case typeTimeN, typeDateTime2N, typeDateTimeOffsetN:
+		props.WriteByte(ti.Scale)
+	case typeBigVarBin, typeBigBinary:
+		if ti.Size > 0xffff {
+			return nil, fmt.Errorf("mssql: sql_variant binary metadata too large: %d", ti.Size)
+		}
+		if err := binary.Write(&props, binary.LittleEndian, uint16(ti.Size)); err != nil {
+			return nil, err
+		}
+	case typeBigVarChar, typeBigChar, typeNVarChar, typeNChar:
+		if ti.Size > 0xffff {
+			return nil, fmt.Errorf("mssql: sql_variant character metadata too large: %d", ti.Size)
+		}
+		if err := writeCollation(&props, ti.Collation); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(&props, binary.LittleEndian, uint16(ti.Size)); err != nil {
+			return nil, err
+		}
+	}
+	return props.Bytes(), nil
 }
 
 func (b *Bulk) dlogf(ctx context.Context, format string, v ...interface{}) {

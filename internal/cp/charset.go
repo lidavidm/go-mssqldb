@@ -10,6 +10,10 @@ type charsetMap struct {
 }
 
 func collation2charset(col Collation) *charsetMap {
+	if col.isUTF8() {
+		return nil
+	}
+
 	// http://msdn.microsoft.com/en-us/library/ms144250.aspx
 	// http://msdn.microsoft.com/en-us/library/ms144250(v=sql.105).aspx
 	switch col.SortId {

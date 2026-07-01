@@ -39,6 +39,50 @@ func requireValueEqual(t *testing.T, expected, actual interface{}, sql string) {
 	require.Equal(t, expected, actual, "value mismatch for %s", sql)
 }
 
+func TestSQLVariantParameters(t *testing.T) {
+	conn, logger := open(t)
+	defer conn.Close()
+	defer logger.StopLogging()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tests := []struct {
+		name  string
+		value SQLVariant
+	}{
+		{
+			name:  "int",
+			value: SQLVariant{BaseTypeID: typeInt4, Value: int64(42)},
+		},
+		{
+			name:  "nvarchar utf8",
+			value: SQLVariant{BaseTypeID: typeNVarChar, Value: "café ☕ 😀"},
+		},
+		{
+			name:  "varchar utf8",
+			value: SQLVariant{BaseTypeID: typeBigVarChar, Value: "café ☕ 😀"},
+		},
+		{
+			name:  "null",
+			value: SQLVariant{BaseTypeID: typeNVarChar},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got any
+			err := conn.QueryRowContext(ctx, "select @p1", tt.value).Scan(&got)
+			require.NoError(t, err)
+			if tt.value.Value == nil {
+				require.Nil(t, got)
+				return
+			}
+			requireValueEqual(t, tt.value, got, tt.name)
+		})
+	}
+}
+
 func driverWithProcess(t *testing.T, tl Logger) *Driver {
 	return &Driver{
 		logger:           optionalLogger{loggerAdapter{tl}},

@@ -111,6 +111,8 @@ type SQLVariant struct {
 	Scale      uint8
 }
 
+var utf8VariantCollation = cp.Collation{LcidAndFlags: 0x24d00409, SortId: 0}
+
 // Common Language Runtime (CLR) Instances
 // http://msdn.microsoft.com/en-us/library/dd357962.aspx
 type udtInfo struct {
@@ -252,7 +254,7 @@ func writeVarLen(w io.Writer, ti *typeInfo, out bool, encoding msdsn.EncodeParam
 				return
 			}
 		}
-	case typeText, typeImage, typeNText, typeVariant:
+	case typeText, typeImage, typeNText:
 		// LONGLEN_TYPE
 		if err = binary.Write(w, binary.LittleEndian, uint32(ti.Size)); err != nil {
 			return
@@ -269,6 +271,13 @@ func writeVarLen(w io.Writer, ti *typeInfo, out bool, encoding msdsn.EncodeParam
 			}
 		}
 		ti.Writer = writeLongLenType
+	case typeVariant:
+		// LONGLEN_TYPE. Values use the SQL_VARIANT instance format, not the
+		// text/image long-value format with text pointers.
+		if err = binary.Write(w, binary.LittleEndian, uint32(ti.Size)); err != nil {
+			return
+		}
+		ti.Writer = writeVariantType
 	default:
 		panic("Invalid type")
 	}
@@ -627,6 +636,20 @@ func writeLongLenType(w io.Writer, ti typeInfo, buf []byte, encoding msdsn.Encod
 
 	err = binary.Write(w, binary.LittleEndian, uint32(ti.Size))
 	if err != nil {
+		return
+	}
+	_, err = w.Write(buf)
+	return
+}
+
+func writeVariantType(w io.Writer, ti typeInfo, buf []byte, encoding msdsn.EncodeParameters) (err error) {
+	if buf == nil {
+		return binary.Write(w, binary.LittleEndian, int32(0))
+	}
+	if len(buf) > 8016 {
+		return fmt.Errorf("mssql: sql_variant value too large: %d bytes", len(buf))
+	}
+	if err = binary.Write(w, binary.LittleEndian, int32(len(buf))); err != nil {
 		return
 	}
 	_, err = w.Write(buf)
@@ -1350,6 +1373,8 @@ func makeDecl(ti typeInfo) string {
 		return "image"
 	case typeGuid:
 		return "uniqueidentifier"
+	case typeVariant:
+		return "sql_variant"
 	case typeTvp:
 		if ti.UdtInfo.SchemaName != "" {
 			return fmt.Sprintf("%s.%s READONLY", ti.UdtInfo.SchemaName, ti.UdtInfo.TypeName)

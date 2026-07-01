@@ -67,6 +67,8 @@ func convertInputParameter(val interface{}) (interface{}, error) {
 		return val, nil
 	case DateTimeOffset:
 		return val, nil
+	case SQLVariant:
+		return val, nil
 	case civil.Date:
 		return val, nil
 	case civil.DateTime:

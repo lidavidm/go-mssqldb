@@ -132,6 +132,7 @@ func testBulkcopy(t *testing.T, guidConversion bool) {
 	geom, _ := hex.DecodeString("E6100000010C00000000000034400000000000004440")
 	bin, _ := hex.DecodeString("ba8b7782168d4033a299333aec17bd33")
 	uid := []byte{0x6F, 0x96, 0x19, 0xFF, 0x8B, 0x86, 0xD0, 0x11, 0xB4, 0x2D, 0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF}
+	variantTime := time.Date(2025, 1, 2, 3, 4, 5, 123456700, time.FixedZone("", 0))
 	testValues := []testValue{
 		{"test_nvarchar", "ab©ĎéⒻghïjklmnopqЯ☀tuvwxyz", nil},
 		{"test_nvarchar_max", "ab©ĎéⒻghïjklmnopqЯ☀tuvwxyz", nil},
@@ -217,6 +218,15 @@ func testBulkcopy(t *testing.T, guidConversion bool) {
 		{"test_imagen", nil, nil},
 		{"test_xml", "<root><child>value</child></root>", nil},
 		{"test_xmln", nil, nil},
+		{"test_variant_int", int32(42), SQLVariant{BaseTypeID: typeInt4, Value: int64(42)}},
+		{"test_variant_nvarchar", "café ☕ 😀", SQLVariant{BaseTypeID: typeNVarChar, Value: "café ☕ 😀"}},
+		{"test_variant_varbinary", []byte{0x12, 0x34}, SQLVariant{BaseTypeID: typeBigVarBin, Value: []byte{0x12, 0x34}}},
+		{"test_variant_bit", true, SQLVariant{BaseTypeID: typeBit, Value: true}},
+		{"test_variant_float", float64(0.125), SQLVariant{BaseTypeID: typeFlt8, Value: float64(0.125)}},
+		{"test_variant_datetimeoffset", variantTime, SQLVariant{BaseTypeID: typeDateTimeOffsetN, Value: variantTime, Scale: 7}},
+		{"test_variant_decimal", SQLVariant{BaseTypeID: typeDecimalN, Value: []byte("-0.5"), Scale: 1}, SQLVariant{BaseTypeID: typeDecimalN, Value: []byte("-0.5"), Scale: 1}},
+		{"test_variant_varchar_utf8", SQLVariant{BaseTypeID: typeBigVarChar, Value: "café ☕ 😀"}, SQLVariant{BaseTypeID: typeBigVarChar, Value: "café ☕ 😀"}},
+		{"test_variant_null", nil, nil},
 	}
 
 	columns := make([]string, len(testValues))
@@ -375,6 +385,24 @@ func compareValue(a interface{}, expected interface{}) bool {
 		}
 
 		return expected.Decimal.Equal(actual)
+	case SQLVariant:
+		actual, ok := a.(SQLVariant)
+		if !ok {
+			return false
+		}
+		if expected.BaseTypeID != actual.BaseTypeID || expected.Scale != actual.Scale {
+			return false
+		}
+		if expectedTime, ok := expected.Value.(time.Time); ok {
+			actualTime, ok := actual.Value.(time.Time)
+			if !ok {
+				return false
+			}
+			_, expectedOffset := expectedTime.Zone()
+			_, actualOffset := actualTime.Zone()
+			return expectedTime.Equal(actualTime) && expectedOffset == actualOffset
+		}
+		return reflect.DeepEqual(expected.Value, actual.Value)
 	default:
 		return reflect.DeepEqual(expected, a)
 	}
@@ -497,6 +525,15 @@ func setupTable(ctx context.Context, t *testing.T, conn *sql.Conn, tableName str
 	[test_datetimen_midnight] [datetime] NULL,
 	[test_image] [image] NOT NULL,
 	[test_imagen] [image] NULL,
+	[test_variant_int] [sql_variant] NULL,
+	[test_variant_nvarchar] [sql_variant] NULL,
+	[test_variant_varbinary] [sql_variant] NULL,
+	[test_variant_bit] [sql_variant] NULL,
+	[test_variant_float] [sql_variant] NULL,
+	[test_variant_datetimeoffset] [sql_variant] NULL,
+	[test_variant_decimal] [sql_variant] NULL,
+	[test_variant_varchar_utf8] [sql_variant] NULL,
+	[test_variant_null] [sql_variant] NULL,
  CONSTRAINT [PK_` + tableName + `_id] PRIMARY KEY CLUSTERED
 (
 	[id] ASC
