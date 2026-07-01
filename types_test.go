@@ -47,6 +47,15 @@ func variantNullReadBuffer(t *testing.T) *tdsBuffer {
 	}
 }
 
+func variantReadBufferFromBytes(buf []byte) *tdsBuffer {
+	return &tdsBuffer{
+		packetSize: len(buf),
+		rbuf:       buf,
+		rsize:      len(buf),
+		final:      true,
+	}
+}
+
 func TestReadVariantTypeWithEncodingReturnsSQLVariantMetadata(t *testing.T) {
 	assert.Nil(t, readVariantTypeWithEncoding(nil, variantNullReadBuffer(t), nil, msdsn.EncodeParameters{}))
 
@@ -121,6 +130,130 @@ func TestReadVariantTypeWithEncodingReturnsSQLVariantMetadata(t *testing.T) {
 			assert.Equal(t, tt.want, tt.got)
 		})
 	}
+}
+
+func TestWriteVariantTypeWithEncodingWritesSQLVariantLengthPrefix(t *testing.T) {
+	var nullBuf bytes.Buffer
+	require.NoError(t, writeVariantType(&nullBuf, typeInfo{TypeId: typeVariant}, nil, msdsn.EncodeParameters{}))
+	assert.Equal(t, []byte{0, 0, 0, 0}, nullBuf.Bytes())
+
+	payload := []byte{typeInt4, 0, 42, 0, 0, 0}
+	var valueBuf bytes.Buffer
+	require.NoError(t, writeVariantType(&valueBuf, typeInfo{TypeId: typeVariant, Size: len(payload)}, payload, msdsn.EncodeParameters{}))
+
+	expected := []byte{6, 0, 0, 0}
+	expected = append(expected, payload...)
+	assert.Equal(t, expected, valueBuf.Bytes())
+}
+
+func TestBulkMakeParamEncodesSQLVariantValues(t *testing.T) {
+	bulk := &Bulk{}
+	col := columnStruct{ti: typeInfo{TypeId: typeVariant, Size: 8016}}
+	tm := time.Date(2025, 1, 2, 3, 4, 5, 123456700, time.FixedZone("", 0))
+	uid := []byte{0x6F, 0x96, 0x19, 0xFF, 0x8B, 0x86, 0xD0, 0x11, 0xB4, 0x2D, 0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF}
+
+	tests := []struct {
+		name  string
+		value any
+		want  SQLVariant
+	}{
+		{
+			name:  "int",
+			value: int32(42),
+			want:  SQLVariant{BaseTypeID: typeInt4, Value: int64(42)},
+		},
+		{
+			name:  "nvarchar",
+			value: "café ☕ 😀",
+			want:  SQLVariant{BaseTypeID: typeNVarChar, Value: "café ☕ 😀"},
+		},
+		{
+			name:  "varbinary",
+			value: []byte{0x12, 0x34},
+			want:  SQLVariant{BaseTypeID: typeBigVarBin, Value: []byte{0x12, 0x34}},
+		},
+		{
+			name:  "bit",
+			value: true,
+			want:  SQLVariant{BaseTypeID: typeBit, Value: true},
+		},
+		{
+			name:  "float",
+			value: float64(0.125),
+			want:  SQLVariant{BaseTypeID: typeFlt8, Value: float64(0.125)},
+		},
+		{
+			name:  "datetimeoffset",
+			value: tm,
+			want:  SQLVariant{BaseTypeID: typeDateTimeOffsetN, Value: tm, Scale: 7},
+		},
+		{
+			name:  "decimal sqlvariant",
+			value: SQLVariant{BaseTypeID: typeDecimalN, Value: []byte("-0.5"), Scale: 1},
+			want:  SQLVariant{BaseTypeID: typeDecimalN, Value: []byte("-0.5"), Scale: 1},
+		},
+		{
+			name:  "money sqlvariant",
+			value: SQLVariant{BaseTypeID: typeMoney, Value: []byte("1.2345"), Scale: 4},
+			want:  SQLVariant{BaseTypeID: typeMoney, Value: []byte("1.2345"), Scale: 4},
+		},
+		{
+			name:  "varchar sqlvariant",
+			value: SQLVariant{BaseTypeID: typeBigVarChar, Value: "café ☕ 😀"},
+			want:  SQLVariant{BaseTypeID: typeBigVarChar, Value: "café ☕ 😀"},
+		},
+		{
+			name:  "guid sqlvariant",
+			value: SQLVariant{BaseTypeID: typeGuid, Value: uid},
+			want:  SQLVariant{BaseTypeID: typeGuid, Value: uid},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			param, err := bulk.makeParam(tt.value, col)
+			require.NoError(t, err)
+			require.Equal(t, uint8(typeVariant), param.ti.TypeId)
+
+			var buf bytes.Buffer
+			require.NoError(t, writeVariantType(&buf, param.ti, param.buffer, msdsn.EncodeParameters{}))
+			got := readVariantTypeWithEncoding(nil, variantReadBufferFromBytes(buf.Bytes()), nil, msdsn.EncodeParameters{})
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBulkMakeParamEncodesNullSQLVariant(t *testing.T) {
+	bulk := &Bulk{}
+	col := columnStruct{ti: typeInfo{TypeId: typeVariant, Size: 8016}}
+
+	param, err := bulk.makeParam(nil, col)
+	require.NoError(t, err)
+	require.Equal(t, uint8(typeVariant), param.ti.TypeId)
+
+	var buf bytes.Buffer
+	require.NoError(t, writeVariantType(&buf, param.ti, param.buffer, msdsn.EncodeParameters{}))
+	assert.Nil(t, readVariantTypeWithEncoding(nil, variantReadBufferFromBytes(buf.Bytes()), nil, msdsn.EncodeParameters{}))
+}
+
+func TestConvertInputParameterAcceptsSQLVariant(t *testing.T) {
+	input := SQLVariant{BaseTypeID: typeInt4, Value: int64(42)}
+	got, err := convertInputParameter(input)
+	require.NoError(t, err)
+	assert.Equal(t, input, got)
+}
+
+func TestStmtMakeParamEncodesSQLVariant(t *testing.T) {
+	stmt := &Stmt{}
+	input := SQLVariant{BaseTypeID: typeBigVarChar, Value: "café ☕ 😀"}
+	param, err := stmt.makeParam(input)
+	require.NoError(t, err)
+	require.Equal(t, uint8(typeVariant), param.ti.TypeId)
+
+	var buf bytes.Buffer
+	require.NoError(t, writeVariantType(&buf, param.ti, param.buffer, msdsn.EncodeParameters{}))
+	got := readVariantTypeWithEncoding(nil, variantReadBufferFromBytes(buf.Bytes()), nil, msdsn.EncodeParameters{})
+	assert.Equal(t, input, got)
 }
 
 func TestMakeGoLangScanType(t *testing.T) {
@@ -383,6 +516,7 @@ func TestMakeDecl(t *testing.T) {
 		{"typeBigChar 50", typeInfo{TypeId: typeBigChar, Size: 50}, "char(50)"},
 		{"typeNChar 30", typeInfo{TypeId: typeNChar, Size: 60}, "nchar(30)"},
 		{"typeGuid", typeInfo{TypeId: typeGuid}, "uniqueidentifier"},
+		{"typeVariant", typeInfo{TypeId: typeVariant}, "sql_variant"},
 	}
 
 	for _, tt := range tests {

@@ -191,6 +191,12 @@ func TestCollation2Charset_NilForUnicode(t *testing.T) {
 	}
 }
 
+func TestCollation2Charset_NilForUTF8(t *testing.T) {
+	t.Parallel()
+	c := Collation{LcidAndFlags: 0x24d00409, SortId: 0}
+	assert.Nil(t, collation2charset(c))
+}
+
 func TestCharsetToUTF8_ASCII(t *testing.T) {
 	t.Parallel()
 	// ASCII characters should pass through unchanged in most code pages
@@ -207,6 +213,14 @@ func TestCharsetToUTF8_NilCharset(t *testing.T) {
 	input := []byte("test")
 	result := CharsetToUTF8(c, input)
 	assert.Equal(t, "test", result)
+}
+
+func TestCharsetToUTF8_UTF8Collation(t *testing.T) {
+	t.Parallel()
+	c := Collation{LcidAndFlags: 0x24d00409, SortId: 0}
+	input := []byte("café ☕ 😀")
+	result := CharsetToUTF8(c, input)
+	assert.Equal(t, "café ☕ 😀", result)
 }
 
 func TestCharsetToUTF8_CP1252_Extended(t *testing.T) {

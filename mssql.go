@@ -444,7 +444,6 @@ func (d *Driver) open(ctx context.Context, dsn string) (*Conn, error) {
 	return d.connect(ctx, c, params)
 }
 
-
 func failoverPartnerParams(params msdsn.Config) *msdsn.Config {
 	if params.FailOverPartner == "" {
 		return nil
@@ -1087,6 +1086,8 @@ func (s *Stmt) makeParam(val driver.Value) (res param, err error) {
 		}
 	}
 	switch val := val.(type) {
+	case SQLVariant:
+		return (&Bulk{cn: s.c}).makeVariantParam(val, columnStruct{ti: typeInfo{TypeId: typeVariant, Size: 8016}})
 	case UniqueIdentifier:
 		res.ti.TypeId = typeGuid
 		res.ti.Size = 16
