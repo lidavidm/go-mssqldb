@@ -81,12 +81,16 @@ func parse(dsn string) (*azureFedAuthConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseConfig(mssqlConfig)
+}
+
+func parseConfig(mssqlConfig msdsn.Config) (*azureFedAuthConfig, error) {
 	config := &azureFedAuthConfig{
 		fedAuthLibrary: mssql.FedAuthLibraryReserved,
 		mssqlConfig:    mssqlConfig,
 	}
 
-	err = config.validateParameters(mssqlConfig.Parameters)
+	err := config.validateParameters(mssqlConfig.Parameters)
 	if err != nil {
 		return nil, err
 	}

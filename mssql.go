@@ -74,6 +74,10 @@ func (d *Driver) OpenConnector(dsn string) (driver.Connector, error) {
 	return newConnector(params, d), nil
 }
 
+func (d *Driver) OpenConnectorConfig(params msdsn.Config) (driver.Connector, error) {
+	return newConnector(params, d), nil
+}
+
 func (d *Driver) Open(dsn string) (driver.Conn, error) {
 	return d.open(context.Background(), dsn)
 }

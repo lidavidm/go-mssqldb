@@ -10,6 +10,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	mssql "github.com/microsoft/go-mssqldb"
+	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
 // DriverName is the name used to register the driver
@@ -38,6 +39,15 @@ func (d *Driver) Open(dsn string) (driver.Conn, error) {
 func NewConnector(dsn string) (*mssql.Connector, AzureTokenCredentialFactory, error) {
 
 	config, err := parse(dsn)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, err := newConnectorConfig(config)
+	return conn, config, err
+}
+
+func NewConnectorConfig(params msdsn.Config) (*mssql.Connector, AzureTokenCredentialFactory, error) {
+	config, err := parseConfig(params)
 	if err != nil {
 		return nil, nil, err
 	}
