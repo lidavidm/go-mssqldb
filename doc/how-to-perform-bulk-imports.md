@@ -56,10 +56,12 @@ Characters not representable in that code page follow SQL Server's conversion
 rules. The transport also accommodates characters whose UTF-8 encoding is
 longer than their destination encoding.
 
-For these columns, both Go `string` and `[]byte` text inputs are assumed to
-contain valid UTF-8. This changes the interpretation
-of `[]byte` values previously sent verbatim: callers supplying text in the
-destination code page must convert it to UTF-8 first.
+Go `string` inputs are UTF-8 and are converted to the selected wire encoding.
+Raw `[]byte` inputs, including those returned by `driver.Valuer`, are assumed
+to already use that encoding and are sent unchanged. For non-UTF-8 `varchar`
+columns, this means UTF-16LE because these columns use `nvarchar` transport;
+for example, pass `[]byte{0xe9, 0}` to insert `é`. Destination-code-page bytes
+such as CP1252 `[]byte{0xe9}` are not UTF-16LE transport data.
 
 UTF-8 `varchar` columns retain their existing transport. Native `nvarchar`
 columns retain their existing behavior, including UTF-16LE `[]byte` inputs.
