@@ -5,6 +5,8 @@ package mssql
 import (
 	"bytes"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -13,6 +15,15 @@ import (
 	"github.com/microsoft/go-mssqldb/msdsn"
 	"github.com/stretchr/testify/require"
 )
+
+type bulkEncodingValuer struct {
+	value driver.Value
+	err   error
+}
+
+func (v bulkEncodingValuer) Value() (driver.Value, error) {
+	return v.value, v.err
+}
 
 func TestBulkVarcharTransportMetadata(t *testing.T) {
 	for _, tc := range []struct {
@@ -61,10 +72,14 @@ func TestBulkVarcharTransportValues(t *testing.T) {
 		payload []byte
 	}{
 		{"string", "é", []byte{0xe9, 0}},
-		{"bytes", []byte("é"), []byte{0xe9, 0}},
+		{"bytes", []byte{0xe9, 0}, []byte{0xe9, 0}},
+		{"raw_bytes", []byte{0xe9, 0x80, 0xc3, 0xa9}, []byte{0xe9, 0x80, 0xc3, 0xa9}},
+		{"byte_valuer", bulkEncodingValuer{value: []byte{0xe9, 0}}, []byte{0xe9, 0}},
+		{"null_byte_valuer", bulkEncodingValuer{value: []byte(nil)}, nil},
+		{"empty_byte_valuer", bulkEncodingValuer{value: []byte{}}, []byte{}},
 		{"CJK", "測", []byte{0x2c, 0x6e}},
 		{"emoji", "😀", []byte{0x3d, 0xd8, 0x00, 0xde}},
-		{"emoji_bytes", []byte("🚢"), []byte{0x3d, 0xd8, 0xa2, 0xde}},
+		{"emoji_bytes", []byte{0x3d, 0xd8, 0xa2, 0xde}, []byte{0x3d, 0xd8, 0xa2, 0xde}},
 		{"supplementary_CJK", "𠀀", []byte{0x40, 0xd8, 0x00, 0xdc}},
 		{"musical_symbol", "𝄞", []byte{0x34, 0xd8, 0x1e, 0xdd}},
 		{"combining", "e\u0301", []byte{0x65, 0x00, 0x01, 0x03}},
@@ -93,6 +108,11 @@ func TestBulkVarcharTransportValues(t *testing.T) {
 	}
 	_, err := b.makeBulkParam(strings.Repeat("é", 40000), col)
 	require.ErrorContains(t, err, "exceeds Unicode bulk transport length")
+	_, err = b.makeBulkParam(bytes.Repeat([]byte{0xe9, 0}, 11), col)
+	require.ErrorContains(t, err, "exceeds Unicode bulk transport length")
+	valuerErr := errors.New("valuer failed")
+	_, err = b.makeBulkParam(bulkEncodingValuer{err: valuerErr}, col)
+	require.ErrorIs(t, err, valuerErr)
 
 	for _, tc := range []struct {
 		typeID    byte
@@ -123,9 +143,10 @@ func TestBulkVarcharEncoding(t *testing.T) {
 		fails       bool
 	}{
 		{"narrow", "varchar(1) COLLATE SQL_Latin1_General_CP1_CI_AS", "é", "é", []byte{0xe9}, false},
-		{"bytes", "varchar(1) COLLATE SQL_Latin1_General_CP1_CI_AS", []byte("é"), "é", []byte{0xe9}, false},
+		{"bytes", "varchar(1) COLLATE SQL_Latin1_General_CP1_CI_AS", []byte{0xe9, 0}, "é", []byte{0xe9}, false},
 		{"boundary", "varchar(4000) COLLATE SQL_Latin1_General_CP1_CI_AS", strings.Repeat("é", 4000), strings.Repeat("é", 4000), bytes.Repeat([]byte{0xe9}, 4000), false},
 		{"PLP", "varchar(4001) COLLATE SQL_Latin1_General_CP1_CI_AS", strings.Repeat("é", 4001), strings.Repeat("é", 4001), bytes.Repeat([]byte{0xe9}, 4001), false},
+		{"PLP_bytes", "varchar(4001) COLLATE SQL_Latin1_General_CP1_CI_AS", bytes.Repeat([]byte{0xe9, 0}, 4001), strings.Repeat("é", 4001), bytes.Repeat([]byte{0xe9}, 4001), false},
 		{"max", "varchar(max) COLLATE SQL_Latin1_General_CP1_CI_AS", strings.Repeat("é", 9000), strings.Repeat("é", 9000), bytes.Repeat([]byte{0xe9}, 9000), false},
 		{"CJK", "varchar(2) COLLATE Chinese_Taiwan_Stroke_CI_AS", "測", "測", []byte{0xb4, 0xfa}, false},
 		{"CJK_overflow", "varchar(2) COLLATE Chinese_Taiwan_Stroke_CI_AS", "測測", "", nil, true},

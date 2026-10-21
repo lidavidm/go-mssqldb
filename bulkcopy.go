@@ -71,6 +71,16 @@ func makeBulkColumn(col columnStruct) bulkColumn {
 }
 
 func (b *Bulk) makeBulkParam(value DataValue, col bulkColumn) (param, error) {
+	if col.transport.TypeId != col.ti.TypeId {
+		// Resolve Valuer before checking for pre-encoded bytes, and only once.
+		if valuer, ok := value.(driver.Valuer); ok {
+			converted, err := driver.DefaultParameterConverter.ConvertValue(valuer)
+			if err != nil {
+				return param{}, err
+			}
+			value = converted
+		}
+	}
 	p, err := b.makeParam(value, col.columnStruct)
 	if err != nil {
 		return p, err
@@ -78,7 +88,10 @@ func (b *Bulk) makeBulkParam(value DataValue, col bulkColumn) (param, error) {
 	if col.transport.TypeId != col.ti.TypeId {
 		p.ti.TypeId = col.transport.TypeId
 		if p.buffer != nil {
-			p.buffer = str2ucs2(string(p.buffer))
+			// Byte slices are already encoded for the selected wire type.
+			if _, raw := value.([]byte); !raw {
+				p.buffer = str2ucs2(string(p.buffer))
+			}
 			p.ti.Size = len(p.buffer)
 			if col.transport.Size <= 8000 && p.ti.Size > col.transport.Size {
 				return p, fmt.Errorf("value exceeds Unicode bulk transport length for column %s", col.ColName)
