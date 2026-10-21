@@ -19,6 +19,7 @@ func (c Collation) getVersion() uint32 {
 	return (c.LcidAndFlags & 0xf0000000) >> 28
 }
 
-func (c Collation) isUTF8() bool {
+// IsUTF8 reports whether the collation uses code page 65001.
+func (c Collation) IsUTF8() bool {
 	return c.LcidAndFlags&0x04000000 != 0
 }

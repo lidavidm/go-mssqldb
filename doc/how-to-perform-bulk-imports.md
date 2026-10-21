@@ -46,3 +46,20 @@ _, err = stmt.Exec()
 
 ## Example
 [Bulk import example](../bulkimport_example_test.go)
+
+## Character encoding
+
+Bulk imports into non-UTF-8 `varchar` columns (including `varchar(max)`)
+use Unicode transport. SQL Server converts the text to the destination
+column's code page, independent of the database default collation.
+Characters not representable in that code page follow SQL Server's conversion
+rules. The transport also accommodates characters whose UTF-8 encoding is
+longer than their destination encoding.
+
+For these columns, both Go `string` and `[]byte` text inputs are assumed to
+contain valid UTF-8. This changes the interpretation
+of `[]byte` values previously sent verbatim: callers supplying text in the
+destination code page must convert it to UTF-8 first.
+
+UTF-8 `varchar` columns retain their existing transport. Native `nvarchar`
+columns retain their existing behavior, including UTF-16LE `[]byte` inputs.

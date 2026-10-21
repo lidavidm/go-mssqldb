@@ -26,7 +26,7 @@ type Bulk struct {
 
 	cn          *Conn
 	metadata    []columnStruct
-	bulkColumns []columnStruct
+	bulkColumns []bulkColumn
 	columnsName []string
 	tablename   string
 	numRows     int
@@ -43,6 +43,49 @@ type BulkOptions struct {
 	RowsPerBatch      int
 	Order             []string
 	Tablock           bool
+}
+
+// bulkColumn keeps destination metadata for input normalization separately
+// from the type declared and encoded on the bulk-copy wire.
+type bulkColumn struct {
+	columnStruct
+	transport typeInfo
+}
+
+func makeBulkColumn(col columnStruct) bulkColumn {
+	result := bulkColumn{columnStruct: col, transport: col.ti}
+	switch col.ti.TypeId {
+	case typeVarChar, typeBigVarChar:
+		if !col.ti.Collation.IsUTF8() {
+			// Send Unicode so SQL Server converts to the destination code page
+			// independently of the database default collation.
+			result.transport.TypeId = typeNVarChar
+			if col.ti.Size == 0 || col.ti.Size > 4000 {
+				result.transport.Size = 0xffff // nvarchar(max), using PLP
+			} else {
+				result.transport.Size = 2 * col.ti.Size
+			}
+		}
+	}
+	return result
+}
+
+func (b *Bulk) makeBulkParam(value DataValue, col bulkColumn) (param, error) {
+	p, err := b.makeParam(value, col.columnStruct)
+	if err != nil {
+		return p, err
+	}
+	if col.transport.TypeId != col.ti.TypeId {
+		p.ti.TypeId = col.transport.TypeId
+		if p.buffer != nil {
+			p.buffer = str2ucs2(string(p.buffer))
+			p.ti.Size = len(p.buffer)
+			if col.transport.Size <= 8000 && p.ti.Size > col.transport.Size {
+				return p, fmt.Errorf("value exceeds Unicode bulk transport length for column %s", col.ColName)
+			}
+		}
+	}
+	return p, nil
 }
 
 type DataValue interface{}
@@ -95,7 +138,7 @@ func (b *Bulk) sendBulkCommand(ctx context.Context) (err error) {
 				//send udt as binary
 				bulkCol.ti.TypeId = typeBigVarBin
 			}
-			b.bulkColumns = append(b.bulkColumns, *bulkCol)
+			b.bulkColumns = append(b.bulkColumns, makeBulkColumn(*bulkCol))
 			b.dlogf(ctx, "Adding column %s %s %#x", colname, bulkCol.ColName, bulkCol.ti.TypeId)
 		} else {
 			return fmt.Errorf("column %s does not exist in destination table %s", colname, b.tablename)
@@ -111,7 +154,7 @@ func (b *Bulk) sendBulkCommand(ctx context.Context) (err error) {
 		if i != 0 {
 			col_defs.WriteString(", ")
 		}
-		col_defs.WriteString(q.ID(col.ColName) + " " + makeDecl(col.ti))
+		col_defs.WriteString(q.ID(col.ColName) + " " + makeDecl(col.transport))
 	}
 
 	//options
@@ -207,16 +250,16 @@ func (b *Bulk) makeRowData(row []interface{}) ([]byte, error) {
 		if b.Debug {
 			logcol.WriteString(fmt.Sprintf(" col[%d]='%v' ", i, row[i]))
 		}
-		param, err := b.makeParam(row[i], col)
+		param, err := b.makeBulkParam(row[i], col)
 		if err != nil {
 			return nil, fmt.Errorf("bulkcopy: %s", err.Error())
 		}
 
-		if col.ti.Writer == nil {
+		if col.transport.Writer == nil {
 			return nil, fmt.Errorf("no writer for column: %s, TypeId: %#x",
 				col.ColName, col.ti.TypeId)
 		}
-		err = col.ti.Writer(buf, param.ti, param.buffer, b.cn.sess.encoding)
+		err = col.transport.Writer(buf, param.ti, param.buffer, b.cn.sess.encoding)
 		if err != nil {
 			return nil, fmt.Errorf("bulkcopy: %s", err.Error())
 		}
@@ -273,7 +316,7 @@ func (b *Bulk) createColMetadata() []byte {
 		}
 		binary.Write(buf, binary.LittleEndian, uint16(col.Flags))
 
-		writeTypeInfo(buf, &b.bulkColumns[i].ti, false, b.cn.sess.encoding)
+		writeTypeInfo(buf, &b.bulkColumns[i].transport, false, b.cn.sess.encoding)
 
 		if col.ti.TypeId == typeNText ||
 			col.ti.TypeId == typeText ||
