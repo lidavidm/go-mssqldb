@@ -125,11 +125,11 @@ func BenchmarkBulkMakeParam_Bool(b *testing.B) {
 func BenchmarkBulkMakeParam_MultiColumn(b *testing.B) {
 	bulk := &Bulk{
 		cn: &Conn{sess: &tdsSession{encoding: benchmarkEncoding()}},
-		bulkColumns: []columnStruct{
-			benchBulkCol(typeIntN, 8),
-			benchBulkCol(typeNVarChar, 100),
-			benchBulkCol(typeFltN, 8),
-			benchBulkCol(typeBitN, 1),
+		bulkColumns: []bulkColumn{
+			makeBulkColumn(benchBulkCol(typeIntN, 8)),
+			makeBulkColumn(benchBulkCol(typeNVarChar, 100)),
+			makeBulkColumn(benchBulkCol(typeFltN, 8)),
+			makeBulkColumn(benchBulkCol(typeBitN, 1)),
 		},
 	}
 
@@ -138,7 +138,7 @@ func BenchmarkBulkMakeParam_MultiColumn(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for colIdx, val := range values {
-			_, err := bulk.makeParam(val, bulk.bulkColumns[colIdx])
+			_, err := bulk.makeBulkParam(val, bulk.bulkColumns[colIdx])
 			if err != nil {
 				b.Fatal(err)
 			}

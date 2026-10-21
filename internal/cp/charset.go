@@ -10,7 +10,7 @@ type charsetMap struct {
 }
 
 func collation2charset(col Collation) *charsetMap {
-	if col.isUTF8() {
+	if col.IsUTF8() {
 		return nil
 	}
 
